@@ -1,0 +1,385 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Event Admin - Upload Photos</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px }
+    .box { border: 1px solid #ddd; padding: 12px; margin-bottom: 12px }
+    .thumb { max-width: 120px; margin: 6px }
+    .progress { width: 200px; background: #eee; height: 10px; border-radius: 6px; display:inline-block; vertical-align:middle }
+    .progress > i { display: block; height: 100%; background: #4caf50; width: 0 }
+    .dropzone { border: 2px dashed #bbb; padding: 20px; text-align: center; color: #666; cursor: pointer }
+    .file-row { display: flex; align-items: center; gap: 10px; margin: 8px 0 }
+    .file-info { flex: 1 }
+    .small { font-size: 12px; color: #666 }
+    .btn { padding:6px 10px; border-radius:4px; border:1px solid #ccc; background:#f7f7f7; cursor:pointer }
+    .btn.primary { background:#007bff; color:#fff; border-color:#007bff }
+    .status { min-width:80px }
+  </style>
+</head>
+<body>
+  <h1>Event Admin — Upload Photos</h1>
+
+  <div class="box" id="auth-box">
+    <div id="auth-forms">
+      <div id="login-form">
+        <h3>Admin Login</h3>
+        <input id="login-email" placeholder="Email" />
+        <input id="login-password" type="password" placeholder="Password" />
+        <button id="login-btn" class="btn primary">Login</button>
+        <div class="small">No admin yet? You can register below (only allowed when no users exist).</div>
+      </div>
+
+      <div id="register-form" style="margin-top:10px">
+        <h4>Register Admin</h4>
+        <input id="reg-email" placeholder="Email" />
+        <input id="reg-password" type="password" placeholder="Password" />
+        <button id="reg-btn" class="btn">Register</button>
+      </div>
+
+      <div id="auth-status" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+  <div class="box" id="main-ui" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h3>Create Event</h3>
+      <div>
+        <span id="me-info"></span>
+        <button id="logout-btn" class="btn">Logout</button>
+      </div>
+    </div>
+
+    <form id="create-event">
+      <input name="name" placeholder="Event name" required />
+      <input name="date" placeholder="YYYY-MM-DD (optional)" />
+      <button class="btn">Create</button>
+    </form>
+    <div id="events-list"></div>
+
+    <hr />
+
+    <h3>Upload Photos</h3>
+    <label>Event: <select id="event-select"></select></label><br/><br/>
+    <label>Photographer (applies to all files): <input id="photographer" placeholder="Photographer name" /></label><br/><br/>
+
+    <div id="dropzone" class="dropzone">Drag & drop images here or click to choose files</div>
+    <input id="files" style="display:none" type="file" multiple accept="image/*" /><br/><br/>
+
+    <div id="files-list"></div>
+
+    <button id="upload" class="btn primary">Upload All</button>
+
+    <div id="upload-results"></div>
+  </div>
+
+  <script>
+    let pendingFiles = []; // array of {id, file, progress, status, xhr}
+    let nextId = 1;
+
+    function humanFileSize(size) {
+      if (size < 1024) return size + ' B';
+      if (size < 1024*1024) return (size/1024).toFixed(1) + ' KB';
+      return (size/1024/1024).toFixed(1) + ' MB';
+    }
+
+    function renderFiles() {
+      const container = document.getElementById('files-list');
+      container.innerHTML = '';
+      for (const f of pendingFiles) {
+        const row = document.createElement('div'); row.className = 'file-row';
+
+        const img = document.createElement('img'); img.className = 'thumb'; img.src = URL.createObjectURL(f.file);
+        row.appendChild(img);
+
+        const info = document.createElement('div'); info.className = 'file-info';
+        info.innerHTML = `<div><strong>${f.file.name}</strong> <span class="small">${humanFileSize(f.file.size)}</span></div>`;
+
+        const progressWrap = document.createElement('div'); progressWrap.className = 'progress';
+        const prog = document.createElement('i'); prog.style.width = (f.progress || 0) + '%'; progressWrap.appendChild(prog);
+        info.appendChild(document.createElement('br'));
+        info.appendChild(progressWrap);
+
+        row.appendChild(info);
+
+        const photographerInput = document.createElement('input'); photographerInput.placeholder = 'Photographer (optional)'; photographerInput.value = f.photographer || '';
+        photographerInput.addEventListener('change', (e) => f.photographer = e.target.value);
+        row.appendChild(photographerInput);
+
+        const status = document.createElement('div'); status.className = 'status'; status.textContent = f.status || '';
+        row.appendChild(status);
+
+        const cancelBtn = document.createElement('button'); cancelBtn.className = 'btn'; cancelBtn.textContent = 'Remove';
+        cancelBtn.addEventListener('click', () => {
+          if (f.xhr) f.xhr.abort();
+          pendingFiles = pendingFiles.filter(p => p.id !== f.id);
+          renderFiles();
+        });
+        row.appendChild(cancelBtn);
+
+        container.appendChild(row);
+      }
+    }
+
+    function addFiles(fileList) {
+      for (const file of fileList) {
+        if (!file.type.startsWith('image/')) continue;
+        pendingFiles.push({ id: nextId++, file, progress: 0, status: 'ready' });
+      }
+      renderFiles();
+    }
+
+    const dropzone = document.getElementById('dropzone');
+    dropzone.addEventListener('click', () => document.getElementById('files').click());
+    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.borderColor = '#007bff'; });
+    dropzone.addEventListener('dragleave', () => { dropzone.style.borderColor = '#bbb'; });
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault(); dropzone.style.borderColor = '#bbb';
+      addFiles(e.dataTransfer.files);
+    });
+
+    document.getElementById('files').addEventListener('change', (e) => addFiles(e.target.files));
+
+    async function uploadFileEntry(eventId, entry, globalPhotographer) {
+      return new Promise((resolve) => {
+        const form = new FormData();
+        form.append('files', entry.file, entry.file.name);
+        if (entry.photographer) form.append('photographer', entry.photographer);
+        else if (globalPhotographer) form.append('photographer', globalPhotographer);
+
+        const xhr = new XMLHttpRequest();
+        entry.xhr = xhr;
+        xhr.open('POST', `/api/events/${eventId}/images`);
+
+        xhr.upload.onprogress = function (ev) {
+          if (ev.lengthComputable) {
+            const pct = Math.round((ev.loaded / ev.total) * 100);
+            entry.progress = pct;
+            renderFiles();
+          }
+        };
+
+        xhr.onload = function () {
+          if (xhr.status === 200) {
+            entry.status = 'done';
+            try { entry.result = JSON.parse(xhr.responseText); } catch (e) { entry.result = xhr.responseText; }
+          } else {
+            entry.status = 'error: ' + xhr.status;
+            entry.result = xhr.responseText;
+          }
+          entry.xhr = null;
+          renderFiles();
+          resolve(entry);
+        };
+
+        xhr.onerror = function () {
+          entry.status = 'network error';
+          entry.xhr = null;
+          renderFiles();
+          resolve(entry);
+        };
+
+        xhr.send(form);
+      });
+    }
+
+    async function uploadAll() {
+      const sel = document.getElementById('event-select');
+      if (!sel.value) return alert('Select an event');
+      if (pendingFiles.length === 0) return alert('No files to upload');
+      const globalPhotographer = document.getElementById('photographer').value;
+
+      // Upload sequentially to keep progress accurate and avoid many parallel connections
+      for (const entry of pendingFiles) {
+        if (entry.status === 'done') continue;
+        entry.status = 'uploading'; renderFiles();
+        await uploadFileEntry(sel.value, entry, globalPhotographer);
+        // refresh event images after each file
+        fetchEventImages(sel.value);
+      }
+
+      // summary
+      const out = document.getElementById('upload-results');
+      const done = pendingFiles.filter(p => p.status === 'done').length;
+      out.innerHTML = `<strong>Finished: ${done} files uploaded</strong>`;
+    }
+
+    document.getElementById('upload').addEventListener('click', uploadAll);
+
+    async function fetchEvents() {
+      const res = await fetch('/api/events');
+      const events = await res.json();
+      const sel = document.getElementById('event-select');
+      sel.innerHTML = '';
+      for (const e of events) {
+        const opt = document.createElement('option');
+        opt.value = e.id; opt.textContent = `${e.id} — ${e.name}`;
+        sel.appendChild(opt);
+      }
+      const list = document.getElementById('events-list');
+      list.innerHTML = events.map(e => `<div>${e.id}: ${e.name} ${e.date || ''}</div>`).join('');
+    }
+
+    document.getElementById('create-event').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target);
+      const body = { name: fd.get('name'), date: fd.get('date') };
+      const res = await fetch('/api/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (res.ok) { fetchEvents(); ev.target.reset(); }
+    });
+
+    async function fetchEventImages(eventId) {
+      const res = await fetch(`/api/events/${eventId}/images`);
+      const images = await res.json();
+      const out = document.getElementById('upload-results');
+      out.innerHTML = `<h4>Images for event ${eventId}</h4>` + images.map(i => `
+        <div style="display:inline-block;margin:6px">
+          <img src="${i.s3_url}" class="thumb" />
+          <div>${i.original_filename}</div>
+          <div>${i.photographer || ''} ${i.uploaded_at}</div>
+        </div>
+      `).join('');
+    }
+
+    let csrfToken = null;
+
+    async function ensureCsrf() {
+      if (csrfToken) return csrfToken;
+      try {
+        const res = await fetch('/api/auth/csrf-token', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          csrfToken = data.csrfToken;
+          return csrfToken;
+        }
+      } catch (e) {
+        console.warn('Could not fetch CSRF token', e);
+      }
+      return null;
+    }
+
+    // Auth helpers
+    async function checkAuth() {
+      await ensureCsrf();
+      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      const data = await res.json();
+      if (data.user) {
+        document.getElementById('main-ui').style.display = 'block';
+        document.getElementById('auth-box').style.display = 'none';
+        document.getElementById('me-info').textContent = data.user.email;
+        fetchEvents();
+      } else {
+        document.getElementById('main-ui').style.display = 'none';
+        document.getElementById('auth-box').style.display = 'block';
+        // show or hide register form depending on whether users exist
+        const ex = await (await fetch('/api/auth/exists', { credentials: 'include' })).json();
+        document.getElementById('register-form').style.display = ex.exists ? 'none' : 'block';
+      }
+    }
+
+    document.getElementById('login-btn').addEventListener('click', async () => {
+      await ensureCsrf();
+      const email = document.getElementById('login-email').value;
+      const password = document.getElementById('login-password').value;
+      const res = await fetch('/api/auth/login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, body: JSON.stringify({ email, password }) });
+      if (res.ok) checkAuth(); else { const txt = await res.text(); alert('Login failed: ' + txt); }
+    });
+
+    document.getElementById('reg-btn').addEventListener('click', async () => {
+      await ensureCsrf();
+      const email = document.getElementById('reg-email').value;
+      const password = document.getElementById('reg-password').value;
+      const res = await fetch('/api/auth/register', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, body: JSON.stringify({ email, password }) });
+      if (res.ok) checkAuth(); else { const txt = await res.text(); alert('Register failed: ' + txt); }
+    });
+
+    document.getElementById('logout-btn').addEventListener('click', async () => {
+      await ensureCsrf();
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: { 'X-CSRF-Token': csrfToken } });
+      checkAuth();
+    });
+
+    // Update create-event to include CSRF
+    document.getElementById('create-event').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      await ensureCsrf();
+      const fd = new FormData(ev.target);
+      const body = { name: fd.get('name'), date: fd.get('date') };
+      const res = await fetch('/api/events', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, body: JSON.stringify(body) });
+      if (res.ok) { fetchEvents(); ev.target.reset(); }
+    });
+
+    // Ensure uploads send CSRF header
+    async function uploadFileEntry(eventId, entry, globalPhotographer) {
+      return new Promise((resolve) => {
+        const form = new FormData();
+        form.append('files', entry.file, entry.file.name);
+        if (entry.photographer) form.append('photographer', entry.photographer);
+        else if (globalPhotographer) form.append('photographer', globalPhotographer);
+
+        const xhr = new XMLHttpRequest();
+        entry.xhr = xhr;
+        xhr.open('POST', `/api/events/${eventId}/images`);
+        if (csrfToken) xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+
+        xhr.upload.onprogress = function (ev) {
+          if (ev.lengthComputable) {
+            const pct = Math.round((ev.loaded / ev.total) * 100);
+            entry.progress = pct;
+            renderFiles();
+          }
+        };
+
+        xhr.onload = function () {
+          if (xhr.status === 200) {
+            entry.status = 'done';
+            try { entry.result = JSON.parse(xhr.responseText); } catch (e) { entry.result = xhr.responseText; }
+          } else {
+            entry.status = 'error: ' + xhr.status;
+            entry.result = xhr.responseText;
+          }
+          entry.xhr = null;
+          renderFiles();
+          resolve(entry);
+        };
+
+        xhr.onerror = function () {
+          entry.status = 'network error';
+          entry.xhr = null;
+          renderFiles();
+          resolve(entry);
+        };
+
+        xhr.send(form);
+      });
+    }
+
+    async function uploadAll() {
+      const sel = document.getElementById('event-select');
+      if (!sel.value) return alert('Select an event');
+      if (pendingFiles.length === 0) return alert('No files to upload');
+      const globalPhotographer = document.getElementById('photographer').value;
+
+      await ensureCsrf();
+
+      // Upload sequentially to keep progress accurate and avoid many parallel connections
+      for (const entry of pendingFiles) {
+        if (entry.status === 'done') continue;
+        entry.status = 'uploading'; renderFiles();
+        await uploadFileEntry(sel.value, entry, globalPhotographer);
+        // refresh event images after each file
+        fetchEventImages(sel.value);
+      }
+
+      // summary
+      const out = document.getElementById('upload-results');
+      const done = pendingFiles.filter(p => p.status === 'done').length;
+      out.innerHTML = `<strong>Finished: ${done} files uploaded</strong>`;
+    }
+
+    // init
+    checkAuth();
+  </script>
+</body>
+</html>
